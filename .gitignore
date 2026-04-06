@@ -164,7 +164,8 @@ logs
 poetry.lock
 private_notebooks
 pytest_*
-!sheeprl/configs/env
+!sheeprl/sheeprl/configs/env/
+!sheeprl/sheeprl/configs/env/*.yaml
 .diambra*
 .hydra
 .pypirc
