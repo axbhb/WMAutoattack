@@ -1,0 +1,5 @@
+size: ???
+memmap: True
+validate_args: False
+from_numpy: False
+checkpoint: True  # Used only for off-policy algorithms
