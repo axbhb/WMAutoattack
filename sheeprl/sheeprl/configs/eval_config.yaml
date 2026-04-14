@@ -25,6 +25,11 @@ attack:
   restarts: 1
   rho: 0.75
   seed: 0
+  tau: 0.15
+  momentum: 0.9
+  beta: 0.6
+  stage1_ratio: 0.4
+  alpha: 0.1
 
 seed: null
 num_threads: 1

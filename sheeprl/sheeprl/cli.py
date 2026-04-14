@@ -20,6 +20,11 @@ from sheeprl.utils.timer import timer
 from sheeprl.utils.utils import dotdict, print_config
 
 
+def _patch_windows_checkpoint_paths() -> None:
+    if os.name == "nt":
+        pathlib.PosixPath = pathlib.WindowsPath
+
+
 def resume_from_checkpoint(cfg: DictConfig) -> DictConfig:
     ckpt_path = pathlib.Path(cfg.checkpoint.resume_from)
     old_cfg = OmegaConf.load(ckpt_path.parent.parent / "config.yaml")
@@ -224,6 +229,7 @@ def eval_algorithm(cfg: DictConfig):
     fabric.seed_everything(cfg.seed)
 
     # Load the checkpoint
+    _patch_windows_checkpoint_paths()
     state = fabric.load(cfg.checkpoint_path)
 
     # Given the algorithm's name, retrieve the module where
@@ -354,10 +360,10 @@ def check_configs_evaluation(cfg: DictConfig):
     if cfg.checkpoint_path is None:
         raise ValueError("You must specify the evaluation checkpoint path")
     if getattr(cfg, "attack", None) is not None and cfg.attack.enabled:
-        if cfg.attack.name.lower() not in {"apgd_ce", "apgd_dlr", "fab", "square"}:
+        if cfg.attack.name.lower() not in {"apgd_ce", "apgd_dlr", "fab", "square", "two_stage"}:
             raise ValueError(
                 f"Unsupported attack '{cfg.attack.name}' for DreamerV3 evaluation. "
-                "Currently supported attacks are 'apgd_ce', 'apgd_dlr', 'fab' and 'square'."
+                "Currently supported attacks are 'apgd_ce', 'apgd_dlr', 'fab', 'square' and 'two_stage'."
             )
         cfg.disable_grads = False
 
@@ -434,6 +440,7 @@ def registration(cfg: DictConfig):
     fabric = Fabric(devices=1, accelerator="cpu", num_nodes=1, precision=precision)
 
     # Load the checkpoint
+    _patch_windows_checkpoint_paths()
     state = fabric.load(cfg.checkpoint_path)
     # Retrieve the algorithm name, used to import the custom
     # log_models_from_checkpoint function.

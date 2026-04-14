@@ -707,6 +707,33 @@ class PlayerDV3(nn.Module):
         _, logits, _ = self._compute_actions(obs, greedy=False, mask=mask, state=state, return_logits=True)
         return logits
 
+    def get_policy_outputs(
+        self,
+        obs: Dict[str, Tensor],
+        mask: Optional[Dict[str, Tensor]] = None,
+        state: Optional["PlayerDV3.StateSnapshot"] = None,
+    ) -> Dict[str, Any]:
+        if state is None:
+            actions = self.actions
+            recurrent_state = self.recurrent_state
+            stochastic_state = self.stochastic_state
+        else:
+            actions = state.actions
+            recurrent_state = state.recurrent_state
+            stochastic_state = state.stochastic_state
+
+        embedded_obs = self.encoder(obs)
+        next_recurrent_state = self.rssm.recurrent_model(torch.cat((stochastic_state, actions), -1), recurrent_state)
+        if self.decoupled_rssm:
+            _, next_stochastic_state = self.rssm._representation(embedded_obs)
+        else:
+            _, next_stochastic_state = self.rssm._representation(next_recurrent_state, embedded_obs)
+        next_stochastic_state = next_stochastic_state.view(
+            *next_stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
+        )
+        actor_input = torch.cat((next_stochastic_state, next_recurrent_state), -1)
+        return self.actor.get_policy_outputs(actor_input, mask)
+
     def _compute_actions(
         self,
         obs: Dict[str, Tensor],
@@ -851,19 +878,7 @@ class Actor(nn.Module):
         out: Tensor = self.model(state)
         pre_dist: List[Tensor] = [head(out) for head in self.mlp_heads]
         if self.is_continuous:
-            mean, std = torch.chunk(pre_dist[0], 2, -1)
-            if self.distribution == "tanh_normal":
-                mean = 5 * torch.tanh(mean / 5)
-                std = F.softplus(std + self.init_std) + self.min_std
-                actions_dist = Normal(mean, std)
-                actions_dist = Independent(TransformedDistribution(actions_dist, TanhTransform()), 1)
-            elif self.distribution == "normal":
-                actions_dist = Normal(mean, std)
-                actions_dist = Independent(actions_dist, 1)
-            elif self.distribution == "scaled_normal":
-                std = (self.max_std - self.min_std) * torch.sigmoid(std + self.init_std) + self.min_std
-                dist = Normal(torch.tanh(mean), std)
-                actions_dist = Independent(dist, 1)
+            _, _, actions_dist = self._continuous_policy_from_pre_dist(pre_dist)
             if not greedy:
                 actions = actions_dist.rsample()
             else:
@@ -886,11 +901,62 @@ class Actor(nn.Module):
                     actions.append(actions_dist[-1].mode)
         return tuple(actions), tuple(actions_dist)
 
+    def get_policy_outputs(self, state: Tensor, mask: Optional[Dict[str, Tensor]] = None) -> Dict[str, Any]:
+        out: Tensor = self.model(state)
+        pre_dist: List[Tensor] = [head(out) for head in self.mlp_heads]
+        if self.is_continuous:
+            mode_action, std, actions_dist = self._continuous_policy_from_pre_dist(pre_dist)
+            return {
+                "is_continuous": True,
+                "actions": (mode_action,),
+                "action_tensor": mode_action,
+                "std_tensor": std,
+                "dists": (actions_dist,),
+                "logits": None,
+            }
+        logits = self._masked_discrete_logits([self._uniform_mix(head(out)) for head in self.mlp_heads], mask)
+        discrete_actions = tuple(logit.argmax(dim=-1) for logit in logits)
+        return {
+            "is_continuous": False,
+            "actions": discrete_actions,
+            "action_tensor": None,
+            "std_tensor": None,
+            "dists": tuple(),
+            "logits": tuple(logits),
+        }
+
     def get_logits(self, state: Tensor, mask: Optional[Dict[str, Tensor]] = None) -> Sequence[Tensor]:
         if self.is_continuous:
             raise RuntimeError("APGD-CE is only defined for discrete DreamerV3 actors.")
         out: Tensor = self.model(state)
         actions_logits: List[Tensor] = [self._uniform_mix(head(out)) for head in self.mlp_heads]
+        return tuple(self._masked_discrete_logits(actions_logits, mask))
+
+    def _continuous_policy_from_pre_dist(self, pre_dist: Sequence[Tensor]) -> Tuple[Tensor, Tensor, Distribution]:
+        mean, std = torch.chunk(pre_dist[0], 2, -1)
+        if self.distribution == "tanh_normal":
+            mean = 5 * torch.tanh(mean / 5)
+            std = F.softplus(std + self.init_std) + self.min_std
+            base_dist = Normal(mean, std)
+            actions_dist: Distribution = Independent(TransformedDistribution(base_dist, TanhTransform()), 1)
+            mode_action = torch.tanh(mean)
+        elif self.distribution == "normal":
+            base_dist = Normal(mean, std)
+            actions_dist = Independent(base_dist, 1)
+            mode_action = mean
+        elif self.distribution == "scaled_normal":
+            std = (self.max_std - self.min_std) * torch.sigmoid(std + self.init_std) + self.min_std
+            mode_action = torch.tanh(mean)
+            base_dist = Normal(mode_action, std)
+            actions_dist = Independent(base_dist, 1)
+        else:
+            raise RuntimeError(f"Unsupported continuous distribution '{self.distribution}'.")
+        return mode_action, std, actions_dist
+
+    def _masked_discrete_logits(
+        self, actions_logits: Sequence[Tensor], mask: Optional[Dict[str, Tensor]] = None
+    ) -> List[Tensor]:
+        actions_logits = list(actions_logits)
         functional_action = None
         for i, logits in enumerate(actions_logits):
             if mask is not None:
@@ -919,7 +985,7 @@ class Actor(nn.Module):
             actions_logits[i] = logits
             if functional_action is None:
                 functional_action = logits.argmax(dim=-1)
-        return tuple(actions_logits)
+        return actions_logits
 
     def _uniform_mix(self, logits: Tensor) -> Tensor:
         if self._unimix > 0.0:

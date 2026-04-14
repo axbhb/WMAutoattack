@@ -130,9 +130,11 @@ def test(
         with (nullcontext() if attacker is not None else torch.no_grad()):
             real_actions = player.get_actions(torch_obs, greedy, action_mask)
         if player.actor.is_continuous:
-            real_actions = torch.stack(real_actions, -1).cpu().numpy()
+            real_actions = torch.stack(real_actions, -1).detach().cpu().numpy()
         else:
-            real_actions = torch.stack([real_act.argmax(dim=-1) for real_act in real_actions], dim=-1).cpu().numpy()
+            real_actions = (
+                torch.stack([real_act.argmax(dim=-1) for real_act in real_actions], dim=-1).detach().cpu().numpy()
+            )
 
         # Single environment step
         obs, reward, done, truncated, _ = env.step(real_actions.reshape(env.action_space.shape))

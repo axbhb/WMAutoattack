@@ -12,6 +12,18 @@ from sheeprl.utils.logger import get_log_dir, get_logger
 from sheeprl.utils.registry import register_evaluation
 
 
+def _unwrap(module):
+    return getattr(module, "module", module)
+
+
+def _unwrap_player_modules(player) -> None:
+    player.encoder = _unwrap(player.encoder)
+    player.rssm.recurrent_model = _unwrap(player.rssm.recurrent_model)
+    player.rssm.transition_model = _unwrap(player.rssm.transition_model)
+    player.rssm.representation_model = _unwrap(player.rssm.representation_model)
+    player.actor = _unwrap(player.actor)
+
+
 @register_evaluation(algorithms="dreamer_v3")
 def evaluate(fabric: Fabric, cfg: Dict[str, Any], state: Dict[str, Any]):
     logger = get_logger(fabric, cfg)
@@ -54,4 +66,6 @@ def evaluate(fabric: Fabric, cfg: Dict[str, Any], state: Dict[str, Any]):
         state["actor"],
     )
     del _
+    if getattr(cfg, "attack", None) and getattr(cfg.attack, "enabled", False):
+        _unwrap_player_modules(player)
     test(player, fabric, cfg, log_dir, greedy=False)

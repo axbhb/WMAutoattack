@@ -40,6 +40,12 @@ def default_search_spaces() -> Dict[str, AttackSearchSpace]:
             step_candidates=(6, 8, 10, 12, 16),
             allocation_modes=("fixed", "margin_linear"),
         ),
+        "two_stage": AttackSearchSpace(
+            attack_name="two_stage",
+            epsilons=(4, 6, 8, 10, 12),
+            step_candidates=(6, 8, 10, 12, 16),
+            allocation_modes=("fixed", "margin_linear"),
+        ),
         "square": AttackSearchSpace(
             attack_name="square",
             epsilons=(4, 6, 8, 10),
@@ -92,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--games", type=str, default="", help="Comma-separated list of game folder names.")
     parser.add_argument("--checkpoint-name", type=str, default="ckpt_100000_0.ckpt")
-    parser.add_argument("--attacks", type=str, default="apgd_ce,apgd_dlr,fab,square")
+    parser.add_argument("--attacks", type=str, default="apgd_ce,apgd_dlr,fab,two_stage,square")
     parser.add_argument("--scout-episodes", type=int, default=3)
     parser.add_argument("--confirm-episodes", type=int, default=10)
     parser.add_argument("--proposal-batch-size", type=int, default=4)

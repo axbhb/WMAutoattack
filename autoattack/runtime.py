@@ -19,7 +19,13 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
 from sheeprl.algos.dreamer_v3.agent import build_agent
-from sheeprl.algos.dreamer_v3.attacks import APGDCrossEntropyAttack, APGDDLRAttack, FABLinfAttack, SquareAttack
+from sheeprl.algos.dreamer_v3.attacks import (
+    APGDCrossEntropyAttack,
+    APGDDLRAttack,
+    FABLinfAttack,
+    SquareAttack,
+    TwoStageMomentumAttack,
+)
 from sheeprl.algos.dreamer_v3.utils import prepare_obs
 from autoattack.probe import ProbeFeatureCollector
 from agent.memory import tokenize_task_name
@@ -114,6 +120,8 @@ class DreamerV3SearchExecutor:
             )
             player.num_envs = 1
             player.eval()
+            if not trial.is_baseline:
+                self._unwrap_player_modules(player)
 
             returns = []
             telemetry = TrialTelemetry()
@@ -129,8 +137,8 @@ class DreamerV3SearchExecutor:
                     action_mask = action_mask if len(action_mask) > 0 else None
 
                     snapshot = player.clone_states()
-                    clean_logits = player.get_policy_logits(torch_obs, mask=action_mask, state=snapshot)
-                    clean_actions, clean_margin = self._actions_and_margin(clean_logits)
+                    clean_policy = player.get_policy_outputs(torch_obs, mask=action_mask, state=snapshot)
+                    clean_actions, clean_margin = self._actions_and_margin(clean_policy)
                     clean_probe_features = None
                     if probe_collector is not None and probe_collector.should_collect():
                         clean_probe_features = self._extract_probe_features(player, torch_obs, action_mask, snapshot)
@@ -146,9 +154,9 @@ class DreamerV3SearchExecutor:
                         attack_steps, attack_epsilon = self._allocator.allocate(trial, clean_margin)
                         attacker = self._create_attack(trial, attack_steps, attack_epsilon, eval_cfg.algo.cnn_keys.encoder)
                         attacked_obs = attacker.perturb(player, torch_obs, action_mask, greedy=False)
-                        adv_logits = player.get_policy_logits(attacked_obs, mask=action_mask, state=snapshot)
-                        adv_actions, adv_margin = self._actions_and_margin(adv_logits)
-                        flipped = adv_actions != clean_actions
+                        adv_policy = player.get_policy_outputs(attacked_obs, mask=action_mask, state=snapshot)
+                        adv_actions, adv_margin = self._actions_and_margin(adv_policy)
+                        flipped = self._actions_flipped(clean_policy, adv_policy)
                         if probe_collector is not None and probe_collector.should_collect():
                             adv_probe_features = self._extract_probe_features(player, attacked_obs, action_mask, snapshot)
                     telemetry.update(clean_margin, adv_margin, flipped, attack_steps, attack_epsilon)
@@ -162,11 +170,11 @@ class DreamerV3SearchExecutor:
                         real_actions = player.get_actions(attacked_obs, greedy=False, mask=action_mask)
 
                     if player.actor.is_continuous:
-                        real_actions = torch.stack(real_actions, -1).cpu().numpy()
+                        real_actions = torch.stack(real_actions, -1).detach().cpu().numpy()
                     else:
                         real_actions = torch.stack(
                             [real_action.argmax(dim=-1) for real_action in real_actions], dim=-1
-                        ).cpu().numpy()
+                        ).detach().cpu().numpy()
 
                     obs, reward, terminated, truncated, _ = env.step(real_actions.reshape(env.action_space.shape))
                     done = bool(terminated or truncated)
@@ -282,15 +290,26 @@ class DreamerV3SearchExecutor:
             return FABLinfAttack(**kwargs)
         if trial.attack_name == "square":
             return SquareAttack(**kwargs)
+        if trial.attack_name == "two_stage":
+            return TwoStageMomentumAttack(**kwargs)
         raise ValueError(f"Unsupported attack '{trial.attack_name}'")
 
-    def _actions_and_margin(self, logits_seq: Sequence[Tensor]) -> Tuple[Tuple[int, ...], float]:
+    def _actions_and_margin(self, policy_outputs: Dict[str, Any]) -> Tuple[Tuple[float, ...], float]:
+        if bool(policy_outputs.get("is_continuous", False)):
+            action_tensor = policy_outputs.get("action_tensor")
+            std_tensor = policy_outputs.get("std_tensor")
+            if action_tensor is None or std_tensor is None:
+                raise RuntimeError("Continuous policy outputs must expose action_tensor and std_tensor.")
+            actions = tuple(float(v) for v in action_tensor.detach().reshape(-1).cpu().tolist())
+            confidence = 1.0 / std_tensor.detach().abs().mean().clamp_min(1e-6)
+            return actions, float(confidence.item())
+
         actions = []
         margins = []
-        for logits in logits_seq:
+        for logits in tuple(policy_outputs.get("logits") or ()):
             flattened = logits.view(-1, logits.shape[-1])
             action = flattened.argmax(dim=-1)[0].item()
-            actions.append(int(action))
+            actions.append(float(action))
             topk = torch.topk(flattened[0], k=min(2, flattened.shape[-1])).values
             if topk.numel() == 1:
                 margin = abs(topk[0].item())
@@ -298,6 +317,22 @@ class DreamerV3SearchExecutor:
                 margin = (topk[0] - topk[1]).item()
             margins.append(float(margin))
         return tuple(actions), float(np.mean(margins)) if len(margins) > 0 else 0.0
+
+    def _actions_flipped(
+        self,
+        clean_policy: Dict[str, Any],
+        adv_policy: Dict[str, Any],
+        continuous_threshold: float = 0.05,
+    ) -> bool:
+        if bool(clean_policy.get("is_continuous", False)):
+            clean_action = clean_policy.get("action_tensor")
+            adv_action = adv_policy.get("action_tensor")
+            if clean_action is None or adv_action is None:
+                return False
+            return bool((adv_action - clean_action).abs().mean().item() > continuous_threshold)
+        clean_actions = tuple(policy.argmax(dim=-1) for policy in tuple(clean_policy.get("logits") or ()))
+        adv_actions = tuple(policy.argmax(dim=-1) for policy in tuple(adv_policy.get("logits") or ()))
+        return any(a.ne(c).any().item() for a, c in zip(adv_actions, clean_actions))
 
     def _extract_probe_features(
         self,
@@ -321,8 +356,16 @@ class DreamerV3SearchExecutor:
             )
             actor_input = torch.cat((next_stochastic_state, next_recurrent_state), -1)
             actor_hidden = player.actor.model(actor_input)
-            policy_logits = player.actor.get_logits(actor_input, action_mask)
-            logits_vector = torch.cat([logit.reshape(-1).float() for logit in policy_logits], dim=0)
+            policy_outputs = player.actor.get_policy_outputs(actor_input, action_mask)
+            if bool(policy_outputs.get("is_continuous", False)):
+                action_tensor = policy_outputs.get("action_tensor")
+                std_tensor = policy_outputs.get("std_tensor")
+                if action_tensor is None or std_tensor is None:
+                    raise RuntimeError("Continuous policy outputs must expose action and std tensors.")
+                logits_vector = torch.cat((action_tensor.reshape(-1), std_tensor.reshape(-1)), dim=0).float()
+            else:
+                policy_logits = tuple(policy_outputs.get("logits") or ())
+                logits_vector = torch.cat([logit.reshape(-1).float() for logit in policy_logits], dim=0)
             return {
                 "encoder": embedded_obs.reshape(-1),
                 "recurrent": next_recurrent_state.reshape(-1),
@@ -330,6 +373,16 @@ class DreamerV3SearchExecutor:
                 "actor_hidden": actor_hidden.reshape(-1),
                 "logits": logits_vector,
             }
+
+    def _unwrap_player_modules(self, player: Any) -> None:
+        def _unwrap(module: Any) -> Any:
+            return getattr(module, "module", module)
+
+        player.encoder = _unwrap(player.encoder)
+        player.rssm.recurrent_model = _unwrap(player.rssm.recurrent_model)
+        player.rssm.transition_model = _unwrap(player.rssm.transition_model)
+        player.rssm.representation_model = _unwrap(player.rssm.representation_model)
+        player.actor = _unwrap(player.actor)
 
     def _persist_result(self, result: TrialResult, summary_writer: Optional[SummaryWriter]) -> None:
         artifact_dir = Path(result.artifact_dir)
