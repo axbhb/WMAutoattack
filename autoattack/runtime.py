@@ -39,6 +39,7 @@ class _TaskContext:
     task: TaskSpec
     cfg: Dict[str, Any]
     state: Dict[str, Any]
+    action_type: Optional[str] = None
 
 
 class MarginStepAllocator:
@@ -240,7 +241,7 @@ class DreamerV3SearchExecutor:
         env_id = str(getattr(context.cfg.env, "id", task.name))
         run_name = str(getattr(context.cfg, "run_name", ""))
         cnn_keys = tuple(getattr(context.cfg.algo.cnn_keys, "encoder", ()) or ())
-        action_type = "continuous" if bool(getattr(context.cfg.algo, "is_continuous", False)) else "discrete"
+        action_type = self._get_action_type(context)
         telemetry = baseline_result.telemetry or {}
         return TaskProfile(
             task_name=task.name,
@@ -256,6 +257,19 @@ class DreamerV3SearchExecutor:
             task_tokens=tuple(tokenize_task_name(task.name) + tokenize_task_name(env_id)),
             probe_representation=baseline_result.probe_representation,
         )
+
+    def _get_action_type(self, context: _TaskContext) -> str:
+        if context.action_type is not None:
+            return context.action_type
+
+        # Infer action type from the actual evaluation environment instead of
+        # relying on checkpoint config fields that may be absent or stale.
+        env = make_env(context.cfg, context.cfg.seed, 0, str(self.output_dir), "test", vector_env_idx=0)()
+        try:
+            context.action_type = "continuous" if isinstance(env.action_space, gym.spaces.Box) else "discrete"
+        finally:
+            env.close()
+        return context.action_type
 
     def _build_eval_cfg(self, base_cfg: Dict[str, Any], trial: TrialConfig, *, capture_video: bool) -> Dict[str, Any]:
         cfg = dotdict(json.loads(json.dumps(base_cfg)))

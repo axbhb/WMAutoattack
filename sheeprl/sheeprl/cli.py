@@ -2,6 +2,7 @@ import importlib
 import os
 import pathlib
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict
 
@@ -23,6 +24,21 @@ from sheeprl.utils.utils import dotdict, print_config
 def _patch_windows_checkpoint_paths() -> None:
     if os.name == "nt":
         pathlib.PosixPath = pathlib.WindowsPath
+
+
+@contextmanager
+def _compat_torch_load_with_pickle() -> Any:
+    original_torch_load = torch.load
+
+    def _wrapped_torch_load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original_torch_load(*args, **kwargs)
+
+    torch.load = _wrapped_torch_load
+    try:
+        yield
+    finally:
+        torch.load = original_torch_load
 
 
 def resume_from_checkpoint(cfg: DictConfig) -> DictConfig:
@@ -228,9 +244,9 @@ def eval_algorithm(cfg: DictConfig):
     # Seed everything
     fabric.seed_everything(cfg.seed)
 
-    # Load the checkpoint
     _patch_windows_checkpoint_paths()
-    state = fabric.load(cfg.checkpoint_path)
+    with _compat_torch_load_with_pickle():
+        state = fabric.load(cfg.checkpoint_path)
 
     # Given the algorithm's name, retrieve the module where
     # 'cfg.algo.name'.py is contained; from there retrieve the
@@ -439,9 +455,9 @@ def registration(cfg: DictConfig):
     precision = getattr(ckpt_cfg.fabric, "precision", None)
     fabric = Fabric(devices=1, accelerator="cpu", num_nodes=1, precision=precision)
 
-    # Load the checkpoint
     _patch_windows_checkpoint_paths()
-    state = fabric.load(cfg.checkpoint_path)
+    with _compat_torch_load_with_pickle():
+        state = fabric.load(cfg.checkpoint_path)
     # Retrieve the algorithm name, used to import the custom
     # log_models_from_checkpoint function.
     algo_name = cfg.algo.name

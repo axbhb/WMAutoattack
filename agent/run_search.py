@@ -24,34 +24,38 @@ def default_search_spaces() -> Dict[str, AttackSearchSpace]:
     return {
         "apgd_ce": AttackSearchSpace(
             attack_name="apgd_ce",
-            epsilons=(4, 6, 8, 10, 12),
-            step_candidates=(4, 6, 8, 10, 12),
+            epsilons=(2, 4, 6, 8, 10, 12, 16, 20),
+            step_candidates=(4, 6, 8, 10, 12, 16, 20, 24),
             allocation_modes=("fixed", "margin_linear"),
+            min_step_fractions=(0.25, 0.5, 0.75),
         ),
         "apgd_dlr": AttackSearchSpace(
             attack_name="apgd_dlr",
-            epsilons=(4, 6, 8, 10, 12),
-            step_candidates=(4, 6, 8, 10, 12),
+            epsilons=(2, 4, 6, 8, 10, 12, 16, 20),
+            step_candidates=(4, 6, 8, 10, 12, 16, 20, 24),
             allocation_modes=("fixed", "margin_linear"),
+            min_step_fractions=(0.25, 0.5, 0.75),
         ),
         "fab": AttackSearchSpace(
             attack_name="fab",
-            epsilons=(4, 6, 8, 10, 12),
-            step_candidates=(6, 8, 10, 12, 16),
+            epsilons=(2, 4, 6, 8, 10, 12, 16, 20),
+            step_candidates=(6, 8, 10, 12, 16, 20, 24, 32),
             allocation_modes=("fixed", "margin_linear"),
+            min_step_fractions=(0.25, 0.5, 0.75),
         ),
         "two_stage": AttackSearchSpace(
             attack_name="two_stage",
-            epsilons=(4, 6, 8, 10, 12),
-            step_candidates=(6, 8, 10, 12, 16),
+            epsilons=(2, 4, 6, 8, 10, 12, 16, 20),
+            step_candidates=(6, 8, 10, 12, 16, 20, 24, 32),
             allocation_modes=("fixed", "margin_linear"),
+            min_step_fractions=(0.25, 0.5, 0.75),
         ),
         "square": AttackSearchSpace(
             attack_name="square",
-            epsilons=(4, 6, 8, 10),
-            step_candidates=(20, 40, 60, 80),
+            epsilons=(2, 4, 6, 8, 10, 12, 16),
+            step_candidates=(20, 40, 60, 80, 100, 120, 160),
             allocation_modes=("fixed", "margin_linear"),
-            min_step_fractions=(0.25, 0.4, 0.6),
+            min_step_fractions=(0.2, 0.4, 0.6, 0.8),
         ),
     }
 
@@ -99,6 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--games", type=str, default="", help="Comma-separated list of game folder names.")
     parser.add_argument("--checkpoint-name", type=str, default="ckpt_100000_0.ckpt")
     parser.add_argument("--attacks", type=str, default="apgd_ce,apgd_dlr,fab,two_stage,square")
+    parser.add_argument(
+        "--initialization-mode",
+        choices=("task_conditioned", "random"),
+        default="task_conditioned",
+        help="How to choose the first proposal when there is no prior history.",
+    )
     parser.add_argument("--scout-episodes", type=int, default=3)
     parser.add_argument("--confirm-episodes", type=int, default=10)
     parser.add_argument("--proposal-batch-size", type=int, default=4)
@@ -123,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experience-retrieval-limit", type=int, default=6)
     parser.add_argument(
         "--experience-retrieval-mode",
-        choices=("structured", "latent", "hybrid"),
+        choices=("none", "structured", "latent", "hybrid"),
         default="structured",
         help="Experience retrieval backend. 'structured' preserves the existing field-based RAG.",
     )
@@ -209,6 +219,7 @@ def main() -> None:
     )
     search_config = SearchConfig(
         output_dir=output_dir,
+        initialization_mode=args.initialization_mode,
         scout_episodes=args.scout_episodes,
         confirm_episodes=args.confirm_episodes,
         proposal_batch_size=args.proposal_batch_size,

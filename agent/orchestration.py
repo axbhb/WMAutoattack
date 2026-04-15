@@ -37,6 +37,7 @@ class DebateSearchController:
     def run(self, tasks: Iterable[TaskSpec], search_spaces: Dict[str, AttackSearchSpace]) -> Dict[str, object]:
         summary: Dict[str, object] = {
             "search_mode": self.search_config.search_mode,
+            "initialization_mode": self.search_config.initialization_mode,
             "agent_backend": self.search_config.agent_backend,
             "agent_model": self.search_config.agent_model,
             "experience_store_path": self.search_config.experience_store_path,
@@ -84,6 +85,8 @@ class DebateSearchController:
                 search_space=search_space,
                 baseline_result=baseline_result,
                 runtime_budget_seconds=self.search_config.runtime_budget_seconds,
+                initialization_mode=self.search_config.initialization_mode,
+                seed=self.search_config.seed,
                 task_profile=task_profile,
                 prior_experiences=self.memory_store.retrieve(
                     task_profile,
@@ -246,6 +249,7 @@ class DebateSearchController:
         lines: List[str] = []
         lines.append("DreamerV3 AutoAttack Multi-Agent Search Summary")
         lines.append("Search mode: {}".format(summary.get("search_mode", "unknown")))
+        lines.append("Initialization mode: {}".format(summary.get("initialization_mode", "task_conditioned")))
         lines.append(
             "Agent backend: {} ({})".format(
                 summary.get("agent_backend", "unknown"),

@@ -1,0 +1,117 @@
+#!/bin/bash
+#SBATCH -A ntu
+#SBATCH -J WMA_DMC_Generic
+#SBATCH -N 1
+#SBATCH -p 6000ada
+#SBATCH -t 24:00:00
+#SBATCH -o /share/guozhix/WMAuotoattack/logs/%j.out
+#SBATCH -e /share/guozhix/WMAuotoattack/logs/%j.err
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:1
+
+set -euo pipefail
+
+source /share/guozhix/software/miniconda3/bin/activate
+conda activate sheeprl_env
+cd /share/guozhix/WMAuotoattack
+
+mkdir -p /share/guozhix/WMAuotoattack/logs
+export MPLCONFIGDIR="/tmp/matplotlib-${SLURM_JOB_ID}"
+mkdir -p "${MPLCONFIGDIR}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+
+TASK_ROOT="${TASK_ROOT:-/share/guozhix/sheeprl/logs/runs/dreamer_v3}"
+TASK_LABEL="${TASK_LABEL:?TASK_LABEL is required}"
+TASK_FOLDER="${TASK_FOLDER:-${TASK_LABEL}}"
+CHECKPOINT_NAME="${CHECKPOINT_NAME:-ckpt_250000_0.ckpt}"
+MODE="${MODE:?MODE must be random or latent}"
+SEED="${SEED:-0}"
+ATTACKS="${ATTACKS:-apgd_ce,apgd_dlr,fab,two_stage,square}"
+ATTACKS_B64="${ATTACKS_B64:-}"
+SCOUT_EPISODES="${SCOUT_EPISODES:-1}"
+CONFIRM_EPISODES="${CONFIRM_EPISODES:-5}"
+PROPOSAL_BATCH_SIZE="${PROPOSAL_BATCH_SIZE:-1}"
+CONFIRM_TOP_K="${CONFIRM_TOP_K:-1}"
+MAX_TRIALS_PER_ATTACK="${MAX_TRIALS_PER_ATTACK:-4}"
+RUNTIME_BUDGET_SECONDS="${RUNTIME_BUDGET_SECONDS:-600}"
+LATENT_SEED_STORE="${LATENT_SEED_STORE:-/share/guozhix/WMAuotoattack/logs/attack_search/probe_scale_20_tasks_experience_2265.jsonl}"
+QUEUE_ROOT="${QUEUE_ROOT:-/share/guozhix/WMAuotoattack/logs/attack_search/dmc_queue}"
+
+if [[ -n "${ATTACKS_B64}" ]]; then
+    ATTACKS="$(printf '%s' "${ATTACKS_B64}" | base64 --decode)"
+fi
+
+OUTPUT_DIR="${OUTPUT_DIR:-${QUEUE_ROOT}/${TASK_LABEL}/${MODE}_${SLURM_JOB_ID}}"
+EXPERIENCE_STORE_PATH="${EXPERIENCE_STORE_PATH:-${QUEUE_ROOT}/experience/${TASK_LABEL}_${MODE}_${SLURM_JOB_ID}.jsonl}"
+
+mkdir -p "${OUTPUT_DIR}"
+mkdir -p "$(dirname "${EXPERIENCE_STORE_PATH}")"
+
+case "${MODE}" in
+    random)
+        INITIALIZATION_MODE="random"
+        EXPERIENCE_RETRIEVAL_MODE="none"
+        EXPERIENCE_RETRIEVAL_LIMIT=0
+        : > "${EXPERIENCE_STORE_PATH}"
+        ;;
+    latent)
+        INITIALIZATION_MODE="task_conditioned"
+        EXPERIENCE_RETRIEVAL_MODE="latent"
+        EXPERIENCE_RETRIEVAL_LIMIT=6
+        if [[ -f "${LATENT_SEED_STORE}" ]]; then
+            cp "${LATENT_SEED_STORE}" "${EXPERIENCE_STORE_PATH}"
+        else
+            : > "${EXPERIENCE_STORE_PATH}"
+        fi
+        ;;
+    *)
+        echo "Unsupported MODE=${MODE}" >&2
+        exit 2
+        ;;
+esac
+
+echo "================================================="
+echo "[$(date)] Starting DMC single-task attack search"
+echo "Task label: ${TASK_LABEL}"
+echo "Task folder: ${TASK_FOLDER}"
+echo "Task root: ${TASK_ROOT}"
+echo "Mode: ${MODE}"
+echo "Initialization: ${INITIALIZATION_MODE}"
+echo "Retrieval: ${EXPERIENCE_RETRIEVAL_MODE}"
+echo "Checkpoint name: ${CHECKPOINT_NAME}"
+echo "Seed: ${SEED}"
+echo "Attacks: ${ATTACKS}"
+echo "Output dir: ${OUTPUT_DIR}"
+echo "Experience store: ${EXPERIENCE_STORE_PATH}"
+echo "MUJOCO_GL: ${MUJOCO_GL}"
+echo "PYOPENGL_PLATFORM: ${PYOPENGL_PLATFORM}"
+echo "================================================="
+
+python main.py attack-search \
+    --task-root "${TASK_ROOT}" \
+    --games "${TASK_FOLDER}" \
+    --checkpoint-name "${CHECKPOINT_NAME}" \
+    --attacks "${ATTACKS}" \
+    --initialization-mode "${INITIALIZATION_MODE}" \
+    --scout-episodes "${SCOUT_EPISODES}" \
+    --confirm-episodes "${CONFIRM_EPISODES}" \
+    --proposal-batch-size "${PROPOSAL_BATCH_SIZE}" \
+    --confirm-top-k "${CONFIRM_TOP_K}" \
+    --max-trials-per-attack "${MAX_TRIALS_PER_ATTACK}" \
+    --runtime-budget-seconds "${RUNTIME_BUDGET_SECONDS}" \
+    --output-dir "${OUTPUT_DIR}" \
+    --seed "${SEED}" \
+    --accelerator cuda \
+    --devices 1 \
+    --precision 32-true \
+    --agent-backend heuristic \
+    --experience-store-path "${EXPERIENCE_STORE_PATH}" \
+    --experience-retrieval-limit "${EXPERIENCE_RETRIEVAL_LIMIT}" \
+    --experience-retrieval-mode "${EXPERIENCE_RETRIEVAL_MODE}" \
+    --experience-latent-projection pca \
+    --experience-latent-dim 16 \
+    --experience-probe-max-steps 32
+
+echo "[$(date)] Finished DMC single-task attack search"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Union
@@ -80,6 +81,8 @@ class AttackSearchState:
     search_space: AttackSearchSpace
     baseline_result: TrialResult
     runtime_budget_seconds: float
+    initialization_mode: str = "task_conditioned"
+    seed: int = 0
     task_profile: Optional[TaskProfile] = None
     prior_experiences: List[RetrievedExperience] = field(default_factory=list)
     proposed_keys: set = field(default_factory=set)
@@ -130,6 +133,14 @@ class AttackSearchState:
 class HeuristicAttackerAgent:
     def propose(self, state: AttackSearchState, batch_size: int) -> List[TrialConfig]:
         base_candidates = [c for c in state.search_space.candidates(state.task) if c.key() not in state.proposed_keys]
+        if self._use_random_initialization(state):
+            rng = random.Random(state.seed)
+            shuffled = list(base_candidates)
+            rng.shuffle(shuffled)
+            proposals = shuffled[:batch_size]
+            for proposal in proposals:
+                state.proposed_keys.add(proposal.key())
+            return proposals
         candidates = self._candidate_pool(state, base_candidates)
         if len(candidates) == 0:
             return []
@@ -139,6 +150,14 @@ class HeuristicAttackerAgent:
         for proposal in proposals:
             state.proposed_keys.add(proposal.key())
         return proposals
+
+    def _use_random_initialization(self, state: AttackSearchState) -> bool:
+        return (
+            state.initialization_mode == "random"
+            and state.best_result() is None
+            and len(state.reflections) == 0
+            and len(state.prior_experiences) == 0
+        )
 
     def _candidate_pool(self, state: AttackSearchState, base_candidates: Sequence[TrialConfig]) -> List[TrialConfig]:
         adaptive_candidates = self._adaptive_variants(state)

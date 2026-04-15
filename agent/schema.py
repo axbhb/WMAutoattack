@@ -360,6 +360,7 @@ class AttackSearchSpace:
 class SearchConfig:
     output_dir: str
     search_mode: str = "reflexion"
+    initialization_mode: str = "task_conditioned"
     scout_episodes: int = 3
     confirm_episodes: int = 10
     proposal_batch_size: int = 4

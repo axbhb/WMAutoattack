@@ -72,6 +72,8 @@ class ExperienceMemoryStore:
         hybrid_weight: float = 0.6,
     ) -> List[RetrievedExperience]:
         normalized_mode = str(mode).strip().lower()
+        if limit <= 0 or normalized_mode in {"none", "disabled", "off"}:
+            return []
         if normalized_mode == "latent":
             latent = self._retrieve_latent(
                 task_profile,
