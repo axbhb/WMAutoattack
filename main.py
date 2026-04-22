@@ -21,6 +21,7 @@ def _usage() -> str:
         "  eval           Run attack-aware evaluation\n"
         "  baseline       Run evaluation with attack disabled\n"
         "  attack-search  Run Reflexion/RAG attack parameter search\n"
+        "  compare-search Run fair Claudini-style vs ours comparison search\n"
     )
 
 
@@ -61,6 +62,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from agent.run_search import main as run_search_main
 
         _run_with_argv(run_search_main, forwarded, "wmautoattack-attack-search")
+        return 0
+    if command == "compare-search":
+        from agent.compare_search import main as compare_search_main
+
+        _run_with_argv(compare_search_main, forwarded, "wmautoattack-compare-search")
         return 0
 
     raise SystemExit("Unknown command '{}'.\n\n{}".format(command, _usage()))

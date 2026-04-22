@@ -45,7 +45,7 @@ class DebateSearchController:
             "tasks": [],
         }
         for task in tasks:
-            task_summary = self._run_task(task, search_spaces)
+            task_summary = self.run_task(task, search_spaces)
             summary["tasks"].append(task_summary)
 
         summary_path = self.output_dir / "search_summary.json"
@@ -54,21 +54,46 @@ class DebateSearchController:
         txt_path.write_text(self._to_text(summary), encoding="utf-8")
         return summary
 
-    def _run_task(self, task: TaskSpec, search_spaces: Dict[str, AttackSearchSpace]) -> Dict[str, object]:
-        baseline_config = TrialConfig(
-            task_name=task.name,
-            checkpoint_path=task.checkpoint_path,
-            attack_name="baseline",
-            epsilon=0.0,
-            steps=0,
+    def run_task(
+        self,
+        task: TaskSpec,
+        search_spaces: Dict[str, AttackSearchSpace],
+        *,
+        baseline_result: TrialResult | None = None,
+        task_profile: TaskProfile | None = None,
+    ) -> Dict[str, object]:
+        return self._run_task(
+            task,
+            search_spaces,
+            baseline_result=baseline_result,
+            task_profile=task_profile,
         )
-        baseline_result = self.executor.run_trial(
-            baseline_config,
-            stage="confirm",
-            num_episodes=self.search_config.confirm_episodes,
-            persist_artifacts=True,
-        )
-        task_profile = self.executor.describe_task(task, baseline_result)
+
+    def _run_task(
+        self,
+        task: TaskSpec,
+        search_spaces: Dict[str, AttackSearchSpace],
+        *,
+        baseline_result: TrialResult | None = None,
+        task_profile: TaskProfile | None = None,
+    ) -> Dict[str, object]:
+        if baseline_result is None:
+            baseline_config = TrialConfig(
+                task_name=task.name,
+                checkpoint_path=task.checkpoint_path,
+                attack_name="baseline",
+                epsilon=0.0,
+                steps=0,
+            )
+            baseline_result = self.executor.run_trial(
+                baseline_config,
+                stage="confirm",
+                num_episodes=self.search_config.confirm_episodes,
+                persist_artifacts=True,
+            )
+        if task_profile is None:
+            task_profile = self.executor.describe_task(task, baseline_result)
+
         self._write_transcript({"event": "baseline", "task": task.name, "result": baseline_result.to_dict()})
 
         task_summary: Dict[str, object] = {
