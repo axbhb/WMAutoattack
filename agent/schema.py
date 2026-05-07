@@ -359,6 +359,7 @@ class AttackSearchSpace:
 @dataclass
 class SearchConfig:
     output_dir: str
+    victim_family: str = "dreamer"
     search_mode: str = "reflexion"
     initialization_mode: str = "task_conditioned"
     scout_episodes: int = 3
@@ -390,6 +391,9 @@ class SearchConfig:
     experience_latent_dim: int = 16
     experience_hybrid_weight: float = 0.6
     experience_probe_max_steps: int = 32
+    tdmpc2_root: str = "/share/guozhix/tdmpc2"
+    tdmpc2_obs: str = "state"
+    iris_root: str = "/share/guozhix/iris"
 
     def ensure_output_dir(self) -> Path:
         path = Path(self.output_dir)

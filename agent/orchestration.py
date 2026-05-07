@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Iterable, List
 
@@ -124,11 +125,15 @@ class DebateSearchController:
                     hybrid_weight=self.search_config.experience_hybrid_weight,
                 ),
             )
+            proposal_state = state if self.search_config.search_mode == "reflexion" else self._static_proposal_state(state)
 
             while len(state.confirmed_results) < self.search_config.max_trials_per_attack:
-                proposals = self.attacker_agent.propose(state, self.search_config.proposal_batch_size)
+                proposals = self.attacker_agent.propose(proposal_state, self.search_config.proposal_batch_size)
                 if len(proposals) == 0:
                     break
+                if proposal_state is not state:
+                    for proposal in proposals:
+                        state.proposed_keys.add(proposal.key())
                 self._write_transcript(
                     {
                         "event": "proposal_batch",
@@ -147,9 +152,10 @@ class DebateSearchController:
                     )
                     scout_audit = self.auditor_agent.audit(state, scout_result)
                     state.record_result(scout_result)
-                    state.record_audit(scout_audit)
-                    state.record_reflection(build_reflection_note(state.baseline_result, scout_result, scout_audit))
-                    self._refresh_prior_experiences(state, scout_result)
+                    if self.search_config.search_mode == "reflexion":
+                        state.record_audit(scout_audit)
+                        state.record_reflection(build_reflection_note(state.baseline_result, scout_result, scout_audit))
+                        self._refresh_prior_experiences(state, scout_result)
                     scout_results.append(scout_result)
                     self._write_transcript(
                         {
@@ -173,9 +179,10 @@ class DebateSearchController:
                     )
                     confirm_audit = self.auditor_agent.audit(state, confirm_result)
                     state.record_result(confirm_result)
-                    state.record_audit(confirm_audit)
-                    state.record_reflection(build_reflection_note(state.baseline_result, confirm_result, confirm_audit))
-                    self._refresh_prior_experiences(state, confirm_result)
+                    if self.search_config.search_mode == "reflexion":
+                        state.record_audit(confirm_audit)
+                        state.record_reflection(build_reflection_note(state.baseline_result, confirm_result, confirm_audit))
+                        self._refresh_prior_experiences(state, confirm_result)
                     self._write_transcript(
                         {
                             "event": "confirm_result",
@@ -192,6 +199,19 @@ class DebateSearchController:
             task_summary["attacks"][attack_name] = attack_summary
             self._persist_experience(task_profile, attack_name, attack_summary, baseline_result)
         return task_summary
+
+    def _static_proposal_state(self, state: AttackSearchState) -> AttackSearchState:
+        frozen = AttackSearchState(
+            task=state.task,
+            search_space=state.search_space,
+            baseline_result=state.baseline_result,
+            runtime_budget_seconds=state.runtime_budget_seconds,
+            initialization_mode=state.initialization_mode,
+            seed=state.seed,
+            task_profile=state.task_profile,
+            prior_experiences=deepcopy(state.prior_experiences),
+        )
+        return frozen
 
     def _select_confirm_candidates(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import gymnasium
@@ -555,6 +556,53 @@ class Actor(nn.Module):
                     actions.append(actions_dist[-1].mode)
         return tuple(actions), tuple(actions_dist)
 
+    def get_policy_outputs(self, state: Tensor, mask: Optional[Dict[str, Tensor]] = None) -> Dict[str, Any]:
+        del mask
+        out: Tensor = self.model(state)
+        pre_dist: List[Tensor] = [head(out) for head in self.mlp_heads]
+        if self.is_continuous:
+            mean, std = torch.chunk(pre_dist[0], 2, -1)
+            if self.distribution == "tanh_normal":
+                mean = 5 * torch.tanh(mean / 5)
+                std = F.softplus(std + self.init_std) + self.min_std
+                actions_dist: Distribution = Independent(TransformedDistribution(Normal(mean, std), TanhTransform()), 1)
+                mode_action = torch.tanh(mean)
+            elif self.distribution == "normal":
+                actions_dist = Independent(Normal(mean, std), 1)
+                mode_action = mean
+            elif self.distribution == "trunc_normal":
+                std = 2 * torch.sigmoid((std + self.init_std) / 2) + self.min_std
+                mode_action = torch.tanh(mean)
+                actions_dist = Independent(TruncatedNormal(mode_action, std, -1, 1), 1)
+            else:
+                raise RuntimeError(f"Unsupported continuous distribution '{self.distribution}'.")
+            return {
+                "is_continuous": True,
+                "actions": (mode_action,),
+                "action_tensor": mode_action,
+                "std_tensor": std,
+                "dists": (actions_dist,),
+                "logits": None,
+            }
+
+        logits = tuple(pre_dist)
+        discrete_actions = tuple(logit.argmax(dim=-1) for logit in logits)
+        return {
+            "is_continuous": False,
+            "actions": discrete_actions,
+            "action_tensor": None,
+            "std_tensor": None,
+            "dists": tuple(),
+            "logits": logits,
+        }
+
+    def get_logits(self, state: Tensor, mask: Optional[Dict[str, Tensor]] = None) -> Sequence[Tensor]:
+        del mask
+        if self.is_continuous:
+            raise RuntimeError("APGD-CE is only defined for discrete DreamerV2 actors.")
+        out: Tensor = self.model(state)
+        return tuple(head(out) for head in self.mlp_heads)
+
     def add_exploration_noise(
         self, actions: Sequence[Tensor], step: int = 0, mask: Optional[Dict[str, Tensor]] = None
     ) -> Sequence[Tensor]:
@@ -732,6 +780,40 @@ class WorldModel(nn.Module):
         self.continue_model = continue_model
 
 
+class _PlayerDV2RSSMProxy:
+    def __init__(self, player: "PlayerDV2") -> None:
+        self._player = player
+        self._transition_model: Optional[nn.Module | _FabricModule] = None
+
+    @property
+    def recurrent_model(self) -> nn.Module | _FabricModule:
+        return self._player.recurrent_model
+
+    @recurrent_model.setter
+    def recurrent_model(self, module: nn.Module | _FabricModule) -> None:
+        self._player.recurrent_model = module
+
+    @property
+    def representation_model(self) -> nn.Module | _FabricModule:
+        return self._player.representation_model
+
+    @representation_model.setter
+    def representation_model(self, module: nn.Module | _FabricModule) -> None:
+        self._player.representation_model = module
+
+    @property
+    def transition_model(self) -> Optional[nn.Module | _FabricModule]:
+        return self._transition_model
+
+    @transition_model.setter
+    def transition_model(self, module: Optional[nn.Module | _FabricModule]) -> None:
+        self._transition_model = module
+
+    def _representation(self, recurrent_state: Tensor, embedded_obs: Tensor) -> Tuple[Tensor, Tensor]:
+        logits = self._player.representation_model(torch.cat((recurrent_state, embedded_obs), -1))
+        return logits, compute_stochastic_state(logits, discrete=self._player.discrete_size)
+
+
 class PlayerDV2(nn.Module):
     """
     The model of the Dreamer_v2 player.
@@ -779,6 +861,14 @@ class PlayerDV2(nn.Module):
         self.device = device
         self.discrete_size = discrete_size
         self.actor_type = actor_type
+        self.decoupled_rssm = False
+        self.rssm = _PlayerDV2RSSMProxy(self)
+
+    @dataclass
+    class StateSnapshot:
+        actions: Tensor
+        recurrent_state: Tensor
+        stochastic_state: Tensor
 
     def init_states(self, reset_envs: Optional[Sequence[int]] = None) -> None:
         """Initialize the states and the actions for the ended environments.
@@ -830,6 +920,68 @@ class PlayerDV2(nn.Module):
         actions, _ = self.actor(torch.cat((self.stochastic_state, self.recurrent_state), -1), greedy, mask)
         self.actions = torch.cat(actions, -1)
         return actions
+
+    def clone_states(self) -> "PlayerDV2.StateSnapshot":
+        return self.StateSnapshot(
+            actions=self.actions.detach().clone(),
+            recurrent_state=self.recurrent_state.detach().clone(),
+            stochastic_state=self.stochastic_state.detach().clone(),
+        )
+
+    def restore_states(self, snapshot: "PlayerDV2.StateSnapshot") -> None:
+        self.actions = snapshot.actions.detach().clone()
+        self.recurrent_state = snapshot.recurrent_state.detach().clone()
+        self.stochastic_state = snapshot.stochastic_state.detach().clone()
+
+    def get_policy_logits(
+        self,
+        obs: Dict[str, Tensor],
+        mask: Optional[Dict[str, Tensor]] = None,
+        state: Optional["PlayerDV2.StateSnapshot"] = None,
+    ) -> Sequence[Tensor]:
+        if state is None:
+            actions = self.actions
+            recurrent_state = self.recurrent_state
+            stochastic_state = self.stochastic_state
+        else:
+            actions = state.actions
+            recurrent_state = state.recurrent_state
+            stochastic_state = state.stochastic_state
+
+        embedded_obs = self.encoder(obs)
+        next_recurrent_state = self.recurrent_model(torch.cat((stochastic_state, actions), -1), recurrent_state)
+        posterior_logits = self.representation_model(torch.cat((next_recurrent_state, embedded_obs), -1))
+        next_stochastic_state = compute_stochastic_state(posterior_logits, discrete=self.discrete_size)
+        next_stochastic_state = next_stochastic_state.view(
+            *next_stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
+        )
+        actor_input = torch.cat((next_stochastic_state, next_recurrent_state), -1)
+        return self.actor.get_logits(actor_input, mask)
+
+    def get_policy_outputs(
+        self,
+        obs: Dict[str, Tensor],
+        mask: Optional[Dict[str, Tensor]] = None,
+        state: Optional["PlayerDV2.StateSnapshot"] = None,
+    ) -> Dict[str, Any]:
+        if state is None:
+            actions = self.actions
+            recurrent_state = self.recurrent_state
+            stochastic_state = self.stochastic_state
+        else:
+            actions = state.actions
+            recurrent_state = state.recurrent_state
+            stochastic_state = state.stochastic_state
+
+        embedded_obs = self.encoder(obs)
+        next_recurrent_state = self.recurrent_model(torch.cat((stochastic_state, actions), -1), recurrent_state)
+        posterior_logits = self.representation_model(torch.cat((next_recurrent_state, embedded_obs), -1))
+        next_stochastic_state = compute_stochastic_state(posterior_logits, discrete=self.discrete_size)
+        next_stochastic_state = next_stochastic_state.view(
+            *next_stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
+        )
+        actor_input = torch.cat((next_stochastic_state, next_recurrent_state), -1)
+        return self.actor.get_policy_outputs(actor_input, mask)
 
 
 def build_agent(

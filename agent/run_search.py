@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List
@@ -65,7 +66,13 @@ def discover_tasks(args: argparse.Namespace) -> List[TaskSpec]:
     if args.checkpoint_path:
         for checkpoint in args.checkpoint_path:
             checkpoint_path = Path(checkpoint).resolve()
-            tasks.append(TaskSpec(name=checkpoint_path.parent.parent.parent.parent.name, checkpoint_path=str(checkpoint_path)))
+            if args.victim_family == "tdmpc2":
+                name = re.sub(r"-\d+$", "", checkpoint_path.stem)
+            elif args.victim_family == "iris":
+                name = checkpoint_path.stem
+            else:
+                name = checkpoint_path.parent.parent.parent.parent.name
+            tasks.append(TaskSpec(name=name, checkpoint_path=str(checkpoint_path)))
         return tasks
 
     if not args.task_root:
@@ -79,11 +86,19 @@ def discover_tasks(args: argparse.Namespace) -> List[TaskSpec]:
     else:
         game_dirs = [path for path in root.iterdir() if path.is_dir()]
 
-    for game_dir in game_dirs:
-        matches = sorted(game_dir.rglob(args.checkpoint_name))
-        if len(matches) == 0:
-            continue
-        tasks.append(TaskSpec(name=game_dir.name, checkpoint_path=str(matches[0])))
+    if args.victim_family in ("tdmpc2", "iris"):
+        for checkpoint_path in sorted(root.glob(args.checkpoint_name)):
+            if args.victim_family == "tdmpc2":
+                task_name = re.sub(r"-\d+$", "", checkpoint_path.stem)
+            else:
+                task_name = checkpoint_path.stem
+            tasks.append(TaskSpec(name=task_name, checkpoint_path=str(checkpoint_path)))
+    else:
+        for game_dir in game_dirs:
+            matches = sorted(game_dir.rglob(args.checkpoint_name))
+            if len(matches) == 0:
+                continue
+            tasks.append(TaskSpec(name=game_dir.name, checkpoint_path=str(matches[0])))
 
     if len(tasks) == 0:
         raise FileNotFoundError("No checkpoint matching the given search criteria was found.")
@@ -92,7 +107,7 @@ def discover_tasks(args: argparse.Namespace) -> List[TaskSpec]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Multi-agent search for DreamerV3 AutoAttack parameters.")
-    parser.add_argument("--task-root", type=str, default="", help="Root directory that contains game folders.")
+    parser.add_argument("--task-root", type=str, default="", help="Root directory that contains game folders or flat checkpoint files.")
     parser.add_argument(
         "--checkpoint-path",
         type=str,
@@ -102,7 +117,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--games", type=str, default="", help="Comma-separated list of game folder names.")
     parser.add_argument("--checkpoint-name", type=str, default="ckpt_100000_0.ckpt")
-    parser.add_argument("--attacks", type=str, default="apgd_ce,apgd_dlr,fab,two_stage,square")
+    parser.add_argument("--attacks", type=str, default="apgd_ce,apgd_dlr,fab,two_stage")
+    parser.add_argument("--victim-family", choices=("dreamer", "tdmpc2", "iris"), default="dreamer")
+    parser.add_argument("--tdmpc2-root", type=str, default="/share/guozhix/tdmpc2")
+    parser.add_argument("--tdmpc2-obs", choices=("state", "rgb"), default="state")
+    parser.add_argument("--iris-root", type=str, default="/share/guozhix/iris")
+    parser.add_argument(
+        "--search-mode",
+        choices=("reflexion", "static"),
+        default="reflexion",
+        help="reflexion enables feedback-driven proposal updates; static keeps proposal generation fixed from the initial state.",
+    )
     parser.add_argument(
         "--initialization-mode",
         choices=("task_conditioned", "random"),
@@ -219,6 +244,8 @@ def main() -> None:
     )
     search_config = SearchConfig(
         output_dir=output_dir,
+        victim_family=args.victim_family,
+        search_mode=args.search_mode,
         initialization_mode=args.initialization_mode,
         scout_episodes=args.scout_episodes,
         confirm_episodes=args.confirm_episodes,
@@ -246,6 +273,9 @@ def main() -> None:
         experience_latent_dim=args.experience_latent_dim,
         experience_hybrid_weight=args.experience_hybrid_weight,
         experience_probe_max_steps=args.experience_probe_max_steps,
+        tdmpc2_root=args.tdmpc2_root,
+        tdmpc2_obs=args.tdmpc2_obs,
+        iris_root=args.iris_root,
     )
     tasks = discover_tasks(args)
     spaces = default_search_spaces()

@@ -71,6 +71,18 @@ def _extract_attack_features(
     snapshot: PlayerStateSnapshot,
     mask: Optional[Dict[str, Tensor]],
 ) -> Tuple[PolicyAttackOutput, Dict[str, Tensor]]:
+    if hasattr(player, "extract_probe_features"):
+        policy = _extract_policy_outputs(player, obs, snapshot, mask)
+        extracted = player.extract_probe_features(obs, snapshot)
+        features = {
+            "encoder": extracted["encoder"],
+            "recurrent": extracted["recurrent"],
+            "stochastic": extracted["stochastic"],
+            "actor_hidden": extracted["actor_hidden"],
+            "policy": extracted.get("policy", extracted.get("logits")),
+        }
+        return policy, features
+
     player.restore_states(snapshot)
     embedded_obs = player.encoder(obs)
     next_recurrent_state = player.rssm.recurrent_model(
@@ -121,6 +133,8 @@ class APGDAttack(ABC):
         seed: int = 0,
         cnn_keys: Optional[Sequence[str]] = None,
         continuous_action_threshold: float = 0.05,
+        clip_min: Optional[float] = -0.5,
+        clip_max: Optional[float] = 0.5,
     ) -> None:
         self.epsilon = float(epsilon) / 255.0
         self.steps = max(int(steps), 1)
@@ -129,6 +143,8 @@ class APGDAttack(ABC):
         self.seed = int(seed)
         self.cnn_keys = tuple(cnn_keys or ())
         self.continuous_action_threshold = float(continuous_action_threshold)
+        self.clip_min = clip_min
+        self.clip_max = clip_max
 
     def perturb(
         self,
@@ -234,7 +250,14 @@ class APGDAttack(ABC):
 
     def _project(self, x_adv: Tensor, x_clean: Tensor) -> Tensor:
         delta = torch.clamp(x_adv - x_clean, min=-self.epsilon, max=self.epsilon)
-        return torch.clamp(x_clean + delta, min=-0.5, max=0.5).detach()
+        projected = x_clean + delta
+        if self.clip_min is not None or self.clip_max is not None:
+            projected = torch.clamp(
+                projected,
+                min=self.clip_min if self.clip_min is not None else None,
+                max=self.clip_max if self.clip_max is not None else None,
+            )
+        return projected.detach()
 
     def _is_success(self, policy: PolicyAttackOutput, clean_policy: PolicyAttackOutput) -> bool:
         if policy.is_continuous:
@@ -301,6 +324,8 @@ class FABLinfAttack:
         eta: float = 1.05,
         beta: float = 0.9,
         continuous_action_threshold: float = 0.05,
+        clip_min: Optional[float] = -0.5,
+        clip_max: Optional[float] = 0.5,
     ) -> None:
         self.epsilon = float(epsilon) / 255.0
         self.steps = max(int(steps), 1)
@@ -311,6 +336,8 @@ class FABLinfAttack:
         self.eta = float(eta)
         self.beta = float(beta)
         self.continuous_action_threshold = float(continuous_action_threshold)
+        self.clip_min = clip_min
+        self.clip_max = clip_max
 
     def perturb(
         self,
@@ -436,7 +463,14 @@ class FABLinfAttack:
 
     def _project(self, x_adv: Tensor, x_clean: Tensor) -> Tensor:
         delta = torch.clamp(x_adv - x_clean, min=-self.epsilon, max=self.epsilon)
-        return torch.clamp(x_clean + delta, min=-0.5, max=0.5).detach()
+        projected = x_clean + delta
+        if self.clip_min is not None or self.clip_max is not None:
+            projected = torch.clamp(
+                projected,
+                min=self.clip_min if self.clip_min is not None else None,
+                max=self.clip_max if self.clip_max is not None else None,
+            )
+        return projected.detach()
 
 
 class SquareAttack:
@@ -451,6 +485,8 @@ class SquareAttack:
         saliency_refresh: int = 12,
         min_square_size: int = 1,
         continuous_action_threshold: float = 0.05,
+        clip_min: Optional[float] = -0.5,
+        clip_max: Optional[float] = 0.5,
     ) -> None:
         self.rho = float(rho)
         self.epsilon = float(epsilon) / 255.0
@@ -462,6 +498,8 @@ class SquareAttack:
         self.min_square_size = max(int(min_square_size), 1)
         self.candidates_per_step = 2
         self.continuous_action_threshold = float(continuous_action_threshold)
+        self.clip_min = clip_min
+        self.clip_max = clip_max
 
     def perturb(
         self,
@@ -657,7 +695,14 @@ class SquareAttack:
 
     def _project(self, x_adv: Tensor, x_clean: Tensor) -> Tensor:
         delta = torch.clamp(x_adv - x_clean, min=-self.epsilon, max=self.epsilon)
-        return torch.clamp(x_clean + delta, min=-0.5, max=0.5).detach()
+        projected = x_clean + delta
+        if self.clip_min is not None or self.clip_max is not None:
+            projected = torch.clamp(
+                projected,
+                min=self.clip_min if self.clip_min is not None else None,
+                max=self.clip_max if self.clip_max is not None else None,
+            )
+        return projected.detach()
 
     def _should_replace(self, current_loss: Tensor, current_success: bool, new_loss: Tensor, new_success: bool) -> bool:
         if new_success and not current_success:
@@ -682,6 +727,8 @@ class TwoStageMomentumAttack:
         stage1_ratio: float = 0.4,
         alpha: float = 0.1,
         continuous_action_threshold: float = 0.05,
+        clip_min: Optional[float] = -0.5,
+        clip_max: Optional[float] = 0.5,
     ) -> None:
         del rho
         self.epsilon = float(epsilon) / 255.0
@@ -695,6 +742,8 @@ class TwoStageMomentumAttack:
         self.stage1_ratio = min(max(float(stage1_ratio), 0.1), 0.9)
         self.alpha = float(alpha)
         self.continuous_action_threshold = float(continuous_action_threshold)
+        self.clip_min = clip_min
+        self.clip_max = clip_max
 
     def perturb(
         self,
@@ -885,7 +934,14 @@ class TwoStageMomentumAttack:
 
     def _project(self, x_adv: Tensor, x_clean: Tensor) -> Tensor:
         delta = torch.clamp(x_adv - x_clean, min=-self.epsilon, max=self.epsilon)
-        return torch.clamp(x_clean + delta, min=-0.5, max=0.5).detach()
+        projected = x_clean + delta
+        if self.clip_min is not None or self.clip_max is not None:
+            projected = torch.clamp(
+                projected,
+                min=self.clip_min if self.clip_min is not None else None,
+                max=self.clip_max if self.clip_max is not None else None,
+            )
+        return projected.detach()
 
 
 def build_attack(cfg: Dict[str, Any]) -> Optional[Any]:
